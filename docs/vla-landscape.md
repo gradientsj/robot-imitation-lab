@@ -194,7 +194,7 @@ Every flow-matching or diffusion VLA above is, at its action head, doing
 what this repo does in miniature: learning to denoise a chunk of future
 actions conditioned on visual features, trained by imitation. Training that
 component from scratch at PushT scale (262M parameters, one consumer GPU,
-one afternoon) is the cheapest honest way to build intuition for the design
+one afternoon) is the cheapest way to build real intuition for the design
 choices that show up at 3B scale: observation history length, action
 horizon, chunk-prefix execution, and the evaluation variance that makes
 success-rate comparisons without confidence intervals meaningless.

@@ -33,7 +33,7 @@ Two readings of this table, both deliberate:
    independent 50-episode protocol lands at 68% / 0.957, inside the CI of
    the published number. An evaluation harness that cannot reproduce a known
    result cannot be trusted to compare anything.
-2. **Training compute is quantified honestly.** Our run used exactly 1/8 of
+2. **Training compute is quantified precisely.** Our run used exactly 1/8 of
    the reference's optimization budget (25k vs 200k steps, same batch size
    64 and lr 1e-4; the reference additionally used a 500-step warmup
    scheduler). The gap is the cost of that budget, measured under matched
@@ -121,7 +121,7 @@ HF repo id was verified to resolve; unverifiable claims are flagged.
 
 The connection to this repo: diffusion/flow-matching action heads are what
 those 3B-parameter models use to produce motor commands. Training one from
-scratch at PushT scale is the cheapest honest way to build intuition for
+scratch at PushT scale is the cheapest way to build real intuition for
 their design choices (observation history, action horizon, chunk-prefix
 execution) and for the evaluation variance that makes success-rate
 comparisons without confidence intervals meaningless.
@@ -148,9 +148,9 @@ tests/                        # 9 CPU-only tests
 
 ## Limitations and next steps
 
-One task, one embodiment, in simulation, 50-episode evaluation: the CIs in
-the table are the honest width of what this measures. Next steps in rough
-priority order:
+A single task and a single embodiment in simulation, evaluated over 50
+episodes: the CIs in the table are the true width of what this measures.
+Next steps in rough priority order:
 
 1. **Compute-matched run**: train to 200k steps (~14 h on the 4090) with the
    reference's warmup schedule and confirm we close the gap to ~65%.
