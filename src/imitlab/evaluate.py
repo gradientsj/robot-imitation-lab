@@ -21,6 +21,34 @@ from pathlib import Path
 
 from .metrics import summarize_episodes
 
+# Stat tensors embedded in old-format checkpoints, keyed the way lerobot
+# (pre-0.4) registered them: {module}.buffer_{feature with . -> _}.{stat}.
+_OLD_NORM_MODULES = ("normalize_inputs", "normalize_targets", "unnormalize_outputs")
+_OLD_STAT_NAMES = ("mean", "std", "min", "max")
+
+
+def extract_stats_from_state_dict(state_dict, feature_names) -> dict | None:
+    """Recover normalization stats embedded in an old-format checkpoint.
+
+    Pre-pipeline lerobot stored normalization stats as state-dict buffers.
+    Those are the stats the policy was actually trained with, and they are
+    not always dataset statistics: lerobot/diffusion_pusht normalizes images
+    with ImageNet mean/std (0.485..., 0.229...), not PushT image stats
+    (mean ~0.97 on a mostly white board). Rebuilding normalization from
+    dataset stats silently degrades that checkpoint from ~65% success to ~4%,
+    so embedded stats take priority over dataset stats. Pure dict logic, unit
+    tested without torch.
+    """
+    stats: dict[str, dict] = {}
+    for feature in feature_names:
+        buffer_name = f"buffer_{feature.replace('.', '_')}"
+        for module in _OLD_NORM_MODULES:
+            for stat in _OLD_STAT_NAMES:
+                tensor = state_dict.get(f"{module}.{buffer_name}.{stat}")
+                if tensor is not None:
+                    stats.setdefault(feature, {})[stat] = tensor
+    return stats or None
+
 
 @dataclass
 class EvalConfig:
@@ -54,6 +82,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_checkpoint_state_dict(checkpoint: str) -> dict:
+    """Load the raw safetensors state dict from a local dir or HF Hub repo."""
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file
+
+    local = Path(checkpoint) / "model.safetensors"
+    if local.is_file():
+        return load_file(str(local))
+    try:
+        return load_file(hf_hub_download(checkpoint, "model.safetensors"))
+    except Exception:
+        return {}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = EvalConfig(
@@ -81,23 +123,31 @@ def main(argv: list[str] | None = None) -> int:
     print(f"loaded {config.checkpoint} on {device}")
 
     # Normalization lives in processor pipelines (lerobot 0.4.x), not in the
-    # policy. Prefer the processors saved with the checkpoint; for old-format
-    # checkpoints that lack them, rebuild from the training dataset's stats.
+    # policy. Resolution order:
+    #   1. processor pipelines saved with the checkpoint (new format);
+    #   2. stats embedded in an old-format checkpoint's state dict, which are
+    #      the stats it was actually trained with (see
+    #      extract_stats_from_state_dict for why this is not optional);
+    #   3. dataset statistics, as a last resort.
+    feature_names = list(policy.config.input_features) + list(policy.config.output_features)
     try:
         preprocessor, postprocessor = make_pre_post_processors(
             policy.config, pretrained_path=config.checkpoint
         )
-        print("loaded processor pipelines from the checkpoint")
+        print("normalization: processor pipelines saved with the checkpoint")
     except (OSError, ValueError, FileNotFoundError):
-        from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+        stats = extract_stats_from_state_dict(
+            _load_checkpoint_state_dict(config.checkpoint), feature_names
+        )
+        if stats is not None:
+            print("normalization: stats embedded in the old-format checkpoint")
+        else:
+            from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 
-        stats = LeRobotDatasetMetadata(config.stats_repo_id).stats
+            stats = LeRobotDatasetMetadata(config.stats_repo_id).stats
+            print(f"normalization: dataset stats from {config.stats_repo_id} (last resort)")
         preprocessor, postprocessor = make_pre_post_processors(
             policy.config, dataset_stats=stats
-        )
-        print(
-            f"checkpoint has no processor pipelines; rebuilt normalization "
-            f"from {config.stats_repo_id} stats"
         )
 
     env = gym.make(

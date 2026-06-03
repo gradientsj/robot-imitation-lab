@@ -24,6 +24,7 @@ dev = [
 [project.scripts]
 imitlab-train = "imitlab.train:main"
 imitlab-eval = "imitlab.evaluate:main"
+imitlab-figures = "imitlab.figures:main"
 
 [build-system]
 requires = ["hatchling"]
