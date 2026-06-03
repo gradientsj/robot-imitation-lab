@@ -19,7 +19,9 @@ import csv
 import json
 from pathlib import Path
 
-SUCCESS_THRESHOLD = 0.95  # gym-pusht terminates at 95% goal coverage
+# gym-pusht reward is goal coverage normalized by the 95% success threshold
+# and clipped to [0, 1], so an episode succeeds iff its max reward reaches 1.0.
+SUCCESS_REWARD = 1.0
 
 
 def _load_eval(path: Path) -> dict:
@@ -99,11 +101,11 @@ def plot_reward_distribution(evals: list[dict], out_png: Path) -> None:
         xs = [i + ((j * 37) % 21 - 10) / 60 for j in range(len(rewards))]
         colors = ["#2a9d4e" if ep["success"] else "#c44e52" for ep in e["episodes"]]
         ax.scatter(xs, rewards, s=22, c=colors, alpha=0.75, edgecolors="none")
-    ax.axhline(SUCCESS_THRESHOLD, linestyle="--", color="#1d1d1f", linewidth=1,
-               label=f"success threshold ({SUCCESS_THRESHOLD:.0%} coverage)")
+    ax.axhline(SUCCESS_REWARD, linestyle="--", color="#1d1d1f", linewidth=1,
+               label="success = reward 1.0 (95% goal coverage)")
     ax.set_xticks(range(len(evals)))
     ax.set_xticklabels([e["name"] for e in evals])
-    ax.set_ylabel("episode max goal coverage")
+    ax.set_ylabel("episode max reward (normalized goal coverage)")
     ax.set_ylim(0, 1.05)
     ax.set_title("Per-episode outcomes (green = success)")
     ax.legend(loc="lower right", fontsize=9)

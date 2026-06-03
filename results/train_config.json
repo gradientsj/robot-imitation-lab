@@ -1,0 +1,12 @@
+{
+  "repo_id": "lerobot/pusht",
+  "steps": 25000,
+  "batch_size": 64,
+  "grad_clip_norm": 10.0,
+  "num_workers": 8,
+  "seed": 42,
+  "log_every": 100,
+  "out_dir": "outputs/train/diffusion_pusht_25k",
+  "video_backend": "pyav",
+  "wall_minutes": 118.1
+}
