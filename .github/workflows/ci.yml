@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The unit tests cover the dependency-free modules (metrics, report),
+      # so CI stays fast and CPU-only: no torch, no lerobot, no GPU. Training
+      # and rollout evaluation run locally on real hardware; their outputs
+      # are committed under results/.
+      - name: Install lint/test tools
+        run: pip install pytest ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit tests
+        run: pytest
