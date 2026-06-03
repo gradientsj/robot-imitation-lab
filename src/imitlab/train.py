@@ -29,6 +29,12 @@ class TrainConfig:
     num_workers: int = 4
     seed: int = 42
     log_every: int = 100
+    # Cosine LR schedule with this many warmup steps; 0 keeps a constant LR.
+    # The lerobot/diffusion_pusht reference trained with warmup_steps=500.
+    warmup_steps: int = 0
+    # Save a milestone checkpoint every N steps (0 = final only). Milestones
+    # make long runs crash-safe and enable success-vs-compute curves.
+    save_every: int = 0
     out_dir: str = "outputs/train/diffusion_pusht"
     video_backend: str = "pyav"  # torchcodec is flaky on Windows; pyav is portable
 
@@ -42,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=defaults.num_workers)
     parser.add_argument("--seed", type=int, default=defaults.seed)
     parser.add_argument("--log-every", type=int, default=defaults.log_every)
+    parser.add_argument("--warmup-steps", type=int, default=defaults.warmup_steps)
+    parser.add_argument("--save-every", type=int, default=defaults.save_every)
     parser.add_argument("--out-dir", default=defaults.out_dir)
     return parser
 
@@ -55,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
         num_workers=args.num_workers,
         seed=args.seed,
         log_every=args.log_every,
+        warmup_steps=args.warmup_steps,
+        save_every=args.save_every,
         out_dir=args.out_dir,
     )
 
@@ -123,6 +133,23 @@ def main(argv: list[str] | None = None) -> int:
         eps=policy_config.optimizer_eps,
         weight_decay=policy_config.optimizer_weight_decay,
     )
+    lr_scheduler = None
+    if config.warmup_steps > 0:
+        from diffusers.optimization import get_scheduler
+
+        lr_scheduler = get_scheduler(
+            "cosine",
+            optimizer=optimizer,
+            num_warmup_steps=config.warmup_steps,
+            num_training_steps=config.steps,
+        )
+
+    def save_checkpoint(directory: Path) -> None:
+        policy.save_pretrained(directory)
+        # Processor pipelines carry the normalization stats; saving them next
+        # to the weights makes the checkpoint complete and self-describing.
+        preprocessor.save_pretrained(directory)
+        postprocessor.save_pretrained(directory)
 
     loader = torch.utils.data.DataLoader(
         dataset,
@@ -137,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     log_path = out_dir / "training_log.csv"
     log_file = log_path.open("w", newline="", encoding="utf-8")
     writer = csv.writer(log_file)
-    writer.writerow(["step", "loss", "steps_per_s"])
+    writer.writerow(["step", "loss", "steps_per_s", "lr"])
 
     step = 0
     running_loss = 0.0
@@ -153,6 +180,8 @@ def main(argv: list[str] | None = None) -> int:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), config.grad_clip_norm)
             optimizer.step()
+            if lr_scheduler is not None:
+                lr_scheduler.step()
 
             step += 1
             running_loss += loss.item()
@@ -160,11 +189,16 @@ def main(argv: list[str] | None = None) -> int:
                 elapsed = time.perf_counter() - window_start
                 avg_loss = running_loss / config.log_every
                 sps = config.log_every / elapsed
-                writer.writerow([step, f"{avg_loss:.5f}", f"{sps:.2f}"])
+                lr = optimizer.param_groups[0]["lr"]
+                writer.writerow([step, f"{avg_loss:.5f}", f"{sps:.2f}", f"{lr:.2e}"])
                 log_file.flush()
                 print(f"step {step:>6}/{config.steps}  loss {avg_loss:.4f}  {sps:.1f} steps/s")
                 running_loss = 0.0
                 window_start = time.perf_counter()
+            if config.save_every and step % config.save_every == 0 and step < config.steps:
+                milestone = out_dir / f"checkpoint_{step:06d}"
+                save_checkpoint(milestone)
+                print(f"saved milestone checkpoint at step {step}: {milestone}")
             if step >= config.steps:
                 done = True
                 break
@@ -172,11 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     log_file.close()
     total_min = (time.perf_counter() - train_start) / 60
     checkpoint_dir = out_dir / "checkpoint"
-    policy.save_pretrained(checkpoint_dir)
-    # Save the processor pipelines next to the weights so the checkpoint is
-    # complete: evaluation can reload normalization without the dataset.
-    preprocessor.save_pretrained(checkpoint_dir)
-    postprocessor.save_pretrained(checkpoint_dir)
+    save_checkpoint(checkpoint_dir)
     (out_dir / "train_config.json").write_text(
         json.dumps(asdict(config) | {"wall_minutes": round(total_min, 1)}, indent=2) + "\n",
         encoding="utf-8",
