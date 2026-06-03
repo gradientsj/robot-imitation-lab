@@ -31,6 +31,11 @@ class EvalConfig:
     max_steps: int = 300
     gif_episodes: int = 2
     out_dir: str = "results"
+    # Normalization fallback for old-format checkpoints (e.g. the Hub's
+    # lerobot/diffusion_pusht predates processor pipelines): rebuild the
+    # processors from this dataset's statistics, which are the same stats the
+    # original policy was trained with.
+    stats_repo_id: str = "lerobot/pusht"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=defaults.max_steps)
     parser.add_argument("--gif-episodes", type=int, default=defaults.gif_episodes)
     parser.add_argument("--out-dir", default=defaults.out_dir)
+    parser.add_argument("--stats-repo-id", default=defaults.stats_repo_id)
     return parser
 
 
@@ -58,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=args.max_steps,
         gif_episodes=args.gif_episodes,
         out_dir=args.out_dir,
+        stats_repo_id=args.stats_repo_id,
     )
 
     import gym_pusht  # noqa: F401  (registers gym_pusht/PushT-v0)
@@ -66,11 +73,32 @@ def main(argv: list[str] | None = None) -> int:
     import numpy as np
     import torch
     from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+    from lerobot.policies.factory import make_pre_post_processors
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = DiffusionPolicy.from_pretrained(config.checkpoint)
     policy.eval().to(device)
     print(f"loaded {config.checkpoint} on {device}")
+
+    # Normalization lives in processor pipelines (lerobot 0.4.x), not in the
+    # policy. Prefer the processors saved with the checkpoint; for old-format
+    # checkpoints that lack them, rebuild from the training dataset's stats.
+    try:
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy.config, pretrained_path=config.checkpoint
+        )
+        print("loaded processor pipelines from the checkpoint")
+    except (OSError, ValueError, FileNotFoundError):
+        from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+
+        stats = LeRobotDatasetMetadata(config.stats_repo_id).stats
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy.config, dataset_stats=stats
+        )
+        print(
+            f"checkpoint has no processor pipelines; rebuilt normalization "
+            f"from {config.stats_repo_id} stats"
+        )
 
     env = gym.make(
         "gym_pusht/PushT-v0",
@@ -94,15 +122,17 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             state = torch.from_numpy(obs["agent_pos"].astype(np.float32))
             image = torch.from_numpy(obs["pixels"].astype(np.float32) / 255.0)
-            image = image.permute(2, 0, 1)  # HWC -> CHW
-            batch = {
-                "observation.state": state.unsqueeze(0).to(device),
-                "observation.image": image.unsqueeze(0).to(device),
-            }
+            image = image.permute(2, 0, 1)  # HWC -> CHW, [0, 1] like the dataset
+            # The preprocessor adds the batch dim, moves to device, normalizes;
+            # the postprocessor unnormalizes the action and returns it on CPU.
+            batch = preprocessor(
+                {"observation.state": state, "observation.image": image}
+            )
             with torch.inference_mode():
                 action = policy.select_action(batch)
+            action = postprocessor(action)
             obs, reward, terminated, truncated, _ = env.step(
-                action.squeeze(0).cpu().numpy()
+                action.squeeze(0).numpy()
             )
             steps += 1
             max_reward = max(max_reward, float(reward))

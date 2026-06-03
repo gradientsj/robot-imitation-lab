@@ -65,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     from lerobot.datasets.utils import dataset_to_policy_features
     from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
     from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+    from lerobot.policies.factory import make_pre_post_processors
 
     random.seed(config.seed)
     np.random.seed(config.seed)
@@ -102,10 +103,18 @@ def main(argv: list[str] | None = None) -> int:
         f"{dataset.num_frames} frames, fps {metadata.fps}"
     )
 
-    policy = DiffusionPolicy(policy_config, dataset_stats=dataset.meta.stats)
+    policy = DiffusionPolicy(policy_config)
     policy.train().to(device)
     n_params = sum(p.numel() for p in policy.parameters())
     print(f"policy: DiffusionPolicy, {n_params / 1e6:.1f}M parameters, device {device}")
+
+    # In lerobot 0.4.x the policy itself does NOT normalize; normalization
+    # lives in processor pipelines built from the dataset statistics. Skipping
+    # this step silently trains on raw pixel-coordinate states/actions and
+    # produces a useless policy (the loss still goes down, which is the trap).
+    preprocessor, postprocessor = make_pre_post_processors(
+        policy_config, dataset_stats=dataset.meta.stats
+    )
 
     optimizer = torch.optim.Adam(
         policy.parameters(),
@@ -137,10 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     done = False
     while not done:
         for batch in loader:
-            batch = {
-                k: (v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v)
-                for k, v in batch.items()
-            }
+            # Normalizes features and moves tensors to the policy device.
+            batch = preprocessor(batch)
             loss, _ = policy.forward(batch)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -166,6 +173,10 @@ def main(argv: list[str] | None = None) -> int:
     total_min = (time.perf_counter() - train_start) / 60
     checkpoint_dir = out_dir / "checkpoint"
     policy.save_pretrained(checkpoint_dir)
+    # Save the processor pipelines next to the weights so the checkpoint is
+    # complete: evaluation can reload normalization without the dataset.
+    preprocessor.save_pretrained(checkpoint_dir)
+    postprocessor.save_pretrained(checkpoint_dir)
     (out_dir / "train_config.json").write_text(
         json.dumps(asdict(config) | {"wall_minutes": round(total_min, 1)}, indent=2) + "\n",
         encoding="utf-8",
