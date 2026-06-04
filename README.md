@@ -23,49 +23,75 @@ data, same evaluation: 50 rollouts in gym-pusht with identical seeds, a
 
 | Policy | Training | Success rate | Wilson 95% CI | Mean max reward |
 |---|---|---|---|---|
-| `ours_diffusion_25k` | 25k steps (~2 h on one 4090) | **10%** (5/50) | 4% - 21% | 0.445 |
-| `lerobot/diffusion_pusht` | 200k steps | **68%** (34/50) | 54% - 79% | 0.957 |
+| `ours_diffusion_25k` | 25k steps, constant lr (~2 h) | 10% (5/50) | 4% - 21% | 0.445 |
+| `ours_diffusion_50k` | 50k milestone of the 200k run | 6% (3/50) | 2% - 16% | 0.569 |
+| `ours_diffusion_100k` | 100k milestone | 24% (12/50) | 14% - 37% | 0.572 |
+| `ours_diffusion_150k` | 150k milestone | **28%** (14/50) | 17% - 42% | 0.669 |
+| `ours_diffusion_200k` | 200k steps, cosine + warmup (~14 h) | 14% (7/50) | 7% - 26% | 0.595 |
+| `lerobot/diffusion_pusht` | 200k steps, reference recipe | **68%** (34/50) | 54% - 79% | 0.957 |
 
-Two readings of this table, both deliberate:
+(Milestones are snapshots of one 200k cosine schedule, so their learning
+rate had not finished decaying; they trace the trajectory rather than
+standing in for independent runs at those budgets.)
+
+![scaling curve](results/figures/scaling_curve.png)
+
+Three readings of this table, and the third is the interesting one:
 
 1. **The protocol is validated.** The reference checkpoint reports 65.4%
    success / 0.955 avg max reward on its model card (500 episodes). Our
    independent 50-episode protocol lands at 68% / 0.957, inside the CI of
    the published number. An evaluation harness that cannot reproduce a known
    result cannot be trusted to compare anything.
-2. **Training compute is quantified precisely.** Our run used exactly 1/8 of
-   the reference's optimization budget (25k vs 200k steps, same batch size
-   64 and lr 1e-4; the reference additionally used a 500-step warmup
-   scheduler). The gap is the cost of that budget, measured under matched
-   conditions rather than estimated.
+2. **Compute helps, noisily, for a while.** Success climbs from 10% toward
+   28% as training proceeds, with overlapping CIs that 50 episodes cannot
+   fully separate.
+3. **Steps alone did not close the gap.** At the full 200k budget with the
+   reference's batch size, learning rate, and warmup schedule, our run
+   reached 14% against the reference's 68%, and the final checkpoint scored
+   *below* the 150k milestone while training loss fell monotonically to
+   0.0020. Diffing the two checkpoints' configs pinpoints the difference:
+   the reference trained with random 84x84 crop augmentation
+   (`crop_shape: [84, 84]`), while LeRobot 0.4.x defaults `crop_shape` to
+   `None`, so our run had no image augmentation at all. On 206
+   demonstrations, that is a recipe for the vision encoder to memorize the
+   training frames, and a success curve that peaks mid-run and regresses
+   while the loss keeps improving is what that looks like from the outside.
+   The corrected run (same budget, crop augmentation restored) is queued as
+   next step #1.
 
 ![success comparison](results/figures/success_comparison.png)
 
-The per-episode picture says more than the rates. The undertrained policy
-shows the full failure spectrum (clean successes, near-misses, partial
+The per-episode picture says more than the rates. Both of our checkpoints
+show the full failure spectrum (clean successes, near-misses, partial
 pushes, whiffs), while the reference is essentially bimodal at the top:
 
 ![per-episode outcomes](results/figures/reward_distribution.png)
 
-Training loss, for the record (log scale, 100-step means):
+Training loss for the 200k run, for the record; note that nothing in this
+curve hints that task success peaked five hours earlier (log scale,
+100-step means):
 
 ![loss curve](results/figures/loss_curve.png)
 
-Rollouts (left: ours at 25k steps; right: the 200k-step reference, same seed):
+Rollouts on the same seed (left to right: ours at 25k, ours at 200k, the
+reference):
 
-| ours | pretrained reference |
-|---|---|
-| ![ours rollout](results/ours_diffusion_25k/rollout_ep0.gif) | ![reference rollout](results/pretrained_diffusion_pusht/rollout_ep0.gif) |
+| ours 25k | ours 200k | pretrained reference |
+|---|---|---|
+| ![ours 25k rollout](results/ours_diffusion_25k/rollout_ep0.gif) | ![ours 200k rollout](results/ours_diffusion_200k/rollout_ep0.gif) | ![reference rollout](results/pretrained_diffusion_pusht/rollout_ep0.gif) |
 
-Raw per-episode records: [`results/ours_diffusion_25k/eval.json`](results/ours_diffusion_25k/eval.json),
-[`results/pretrained_diffusion_pusht/eval.json`](results/pretrained_diffusion_pusht/eval.json).
-Training log and config snapshot: [`results/training_log.csv`](results/training_log.csv),
-[`results/train_config.json`](results/train_config.json).
+Raw per-episode records live in `results/<run>/eval.json` for all six
+evaluations. Training logs and config snapshots:
+[`results/training_log.csv`](results/training_log.csv) /
+[`results/train_config.json`](results/train_config.json) (25k run),
+[`results/training_log_200k.csv`](results/training_log_200k.csv) /
+[`results/train_config_200k.json`](results/train_config_200k.json) (200k run).
 
-## Two failure modes this project had to catch
+## Three failure modes this project had to catch
 
-Both lived in normalization, both failed silently, and both are recorded in
-the commit history as they happened:
+All three failed silently, and all three are recorded in the commit history
+as they happened:
 
 1. **The loss can lie.** LeRobot 0.4.x moved normalization out of the policy
    into processor pipelines; the older `dataset_stats` constructor kwarg is
@@ -84,6 +110,14 @@ the commit history as they happened:
    priority order: processors saved with the checkpoint, then stats embedded
    in old-format state dicts (extracted, unit tested), then dataset stats
    with a warning.
+3. **Defaults drift across library versions.** The reference recipe trained
+   with random 84x84 crop augmentation; LeRobot 0.4.x changed the
+   `crop_shape` default to `None`, so a training run written against current
+   defaults silently loses the augmentation the published results depend on.
+   Nothing fails, the loss improves, and task success quietly stalls then
+   regresses (28% at 150k steps, 14% at 200k). The config diff between
+   checkpoints is what surfaced it, which is an argument for always
+   committing config snapshots next to results.
 
 ## Quickstart
 
@@ -132,17 +166,19 @@ comparisons without confidence intervals meaningless.
 src/imitlab/
   train.py      # compact Diffusion Policy training loop (lerobot 0.4.x API)
   evaluate.py   # matched-seed rollout eval; normalization provenance chain
-  figures.py    # success comparison, outcome distribution, loss curve
+  figures.py    # scaling curve, success comparison, distributions, loss
   metrics.py    # Wilson intervals + episode summaries (pure Python, tested)
   report.py     # markdown comparison table
 docs/
   vla-landscape.md            # the open VLA model survey
 results/
-  ours_diffusion_25k/         # our policy: eval.json + rollout GIFs
+  ours_diffusion_25k/         # 25k run: eval.json + rollout GIFs
+  ours_diffusion_{50,100,150}k/  # 200k-run milestones: eval.json each
+  ours_diffusion_200k/        # final 200k checkpoint: eval.json + GIFs
   pretrained_diffusion_pusht/ # reference: eval.json + rollout GIFs
   figures/                    # committed PNGs used above
-  training_log.csv            # 25k-step loss/throughput log
-  train_config.json           # exact run configuration
+  training_log{,_200k}.csv    # loss/throughput logs for both runs
+  train_config{,_200k}.json   # exact run configurations
 tests/                        # 9 CPU-only tests
 ```
 
@@ -152,8 +188,10 @@ A single task and a single embodiment in simulation, evaluated over 50
 episodes: the CIs in the table are the true width of what this measures.
 Next steps in rough priority order:
 
-1. **Compute-matched run**: train to 200k steps (~14 h on the 4090) with the
-   reference's warmup schedule and confirm we close the gap to ~65%.
+1. **Recipe-matched run**: the compute-matched run is done and answered its
+   question in the negative; the follow-up restores the reference's random
+   84x84 crop augmentation at the same 200k budget and tests whether recipe
+   parity closes the remaining 14% vs 68% gap.
 2. **Tighter evaluation**: 200-500 episodes to shrink the CIs before making
    any finer-grained claims.
 3. **A VLA fine-tune**: SmolVLA (0.5B, designed for consumer GPUs) on a

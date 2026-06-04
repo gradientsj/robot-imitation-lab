@@ -115,10 +115,65 @@ def plot_reward_distribution(evals: list[dict], out_png: Path) -> None:
     plt.close(fig)
 
 
+def plot_scaling(
+    points: list[tuple[int, dict]], reference: dict | None, out_png: Path
+) -> None:
+    """Success rate vs. training steps, CI whiskers per point, with the
+    pretrained reference drawn as a horizontal band for context."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    points = sorted(points, key=lambda sp: sp[0])
+    steps = [s for s, _ in points]
+    rates = [e["summary"]["success_rate"] for _, e in points]
+    los = [r - e["summary"]["success_ci95"][0] for r, (_, e) in zip(rates, points, strict=True)]
+    his = [e["summary"]["success_ci95"][1] - r for r, (_, e) in zip(rates, points, strict=True)]
+
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    if reference is not None:
+        ref = reference["summary"]
+        low, high = ref["success_ci95"]
+        ax.axhspan(low, high, color="#c9d7f0", alpha=0.5, zorder=0)
+        ax.axhline(ref["success_rate"], color="#4878cf", linestyle="--", linewidth=1,
+                   label=f"{reference['name']} ({ref['success_rate']:.0%}, 95% CI band)")
+    ax.errorbar(steps, rates, yerr=[los, his], fmt="o-", color="#1d1d1f",
+                capsize=5, linewidth=1.4, markersize=5, label="ours (same 50 seeds)")
+    for s, r in zip(steps, rates, strict=True):
+        ax.annotate(f"{r:.0%}", (s, r), textcoords="offset points", xytext=(0, 9),
+                    ha="center", fontsize=9)
+    ax.set_xlabel("training steps")
+    ax.set_ylabel("success rate")
+    ax.set_ylim(0, 1)
+    ax.set_xticks(steps)
+    ax.set_xticklabels([f"{s // 1000}k" for s in steps])
+    n = points[0][1]["summary"]["n_episodes"]
+    ax.set_title(f"PushT success vs. training compute ({n} matched-seed episodes per point)")
+    ax.legend(loc="lower right", fontsize=9)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=140)
+    plt.close(fig)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("eval_jsons", nargs="+", help="eval.json paths, plotted in order")
     parser.add_argument("--train-log", default=None, help="training_log.csv for the loss curve")
+    parser.add_argument(
+        "--scaling",
+        action="append",
+        default=None,
+        metavar="STEPS=EVAL_JSON",
+        help="repeatable; adds a success-vs-training-steps point, e.g. "
+        "--scaling 25000=results/ours_diffusion_25k/eval.json",
+    )
+    parser.add_argument(
+        "--reference",
+        default=None,
+        help="eval.json drawn as a horizontal band on the scaling plot",
+    )
     parser.add_argument("--out-dir", default="results/figures")
     args = parser.parse_args(argv)
 
@@ -133,6 +188,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.train_log:
         plot_loss(Path(args.train_log), out_dir / "loss_curve.png")
         print(f"wrote {out_dir / 'loss_curve.png'}")
+    if args.scaling:
+        points = []
+        for spec in args.scaling:
+            steps_str, _, path = spec.partition("=")
+            points.append((int(steps_str), _load_eval(Path(path))))
+        reference = _load_eval(Path(args.reference)) if args.reference else None
+        plot_scaling(points, reference, out_dir / "scaling_curve.png")
+        print(f"wrote {out_dir / 'scaling_curve.png'}")
     return 0
 
 

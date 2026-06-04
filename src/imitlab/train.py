@@ -32,6 +32,11 @@ class TrainConfig:
     # Cosine LR schedule with this many warmup steps; 0 keeps a constant LR.
     # The lerobot/diffusion_pusht reference trained with warmup_steps=500.
     warmup_steps: int = 0
+    # Random square crop augmentation (random at train, center at eval,
+    # applied inside the policy). 0 disables it. The reference recipe used
+    # 84; LeRobot 0.4.x defaults to no crop, and that difference alone is
+    # worth tens of points of success on 206 demonstrations (see README).
+    crop_size: int = 0
     # Save a milestone checkpoint every N steps (0 = final only). Milestones
     # make long runs crash-safe and enable success-vs-compute curves.
     save_every: int = 0
@@ -49,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=defaults.seed)
     parser.add_argument("--log-every", type=int, default=defaults.log_every)
     parser.add_argument("--warmup-steps", type=int, default=defaults.warmup_steps)
+    parser.add_argument("--crop-size", type=int, default=defaults.crop_size)
     parser.add_argument("--save-every", type=int, default=defaults.save_every)
     parser.add_argument("--out-dir", default=defaults.out_dir)
     return parser
@@ -64,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         log_every=args.log_every,
         warmup_steps=args.warmup_steps,
+        crop_size=args.crop_size,
         save_every=args.save_every,
         out_dir=args.out_dir,
     )
@@ -93,7 +100,9 @@ def main(argv: list[str] | None = None) -> int:
     output_features = {k: ft for k, ft in features.items() if ft.type is FeatureType.ACTION}
     input_features = {k: ft for k, ft in features.items() if k not in output_features}
     policy_config = DiffusionConfig(
-        input_features=input_features, output_features=output_features
+        input_features=input_features,
+        output_features=output_features,
+        crop_shape=(config.crop_size, config.crop_size) if config.crop_size else None,
     )
     delta_timestamps = {
         key: [i / metadata.fps for i in policy_config.observation_delta_indices]
